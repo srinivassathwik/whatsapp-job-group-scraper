@@ -697,11 +697,133 @@ def open_group(page, group_name: str) -> bool:
         return False
 
 
+
+def _expand_read_more(bubble):
+    """Click WhatsApp's 'Read more' so long messages are fully expanded."""
+    try:
+        rm = bubble.locator(
+            'span[role="button"]:has-text("Read more"), '
+            'span.read-more-button, '
+            'span[data-testid="read-more-button"], '
+            'div[aria-label="Read more"]'
+        ).first
+        if rm.is_visible(timeout=250):
+            rm.click(timeout=1000)
+            time.sleep(0.1)
+    except Exception:
+        pass
+
+
+def _extract_bubble_data(bubble):
+    """Return {'sender','wa_timestamp','text'} for one bubble, or None."""
+    try:
+        _expand_read_more(bubble)
+
+        # ── Text ─────────────────────────────────────────────────────
+        try:
+            text = bubble.evaluate(
+                "el => {"
+                "  const spans = el.querySelectorAll('span.selectable-text');"
+                "  return Array.from(spans).map(s => s.innerText || s.textContent).join('\\n').trim();"
+                "}"
+            ) or ""
+        except Exception:
+            try:
+                text = (bubble.locator("span.selectable-text").first
+                        .text_content(timeout=1500) or "").strip()
+            except Exception:
+                text = ""
+        text = text.strip()
+        if not text:
+            return None
+
+        # ── Sender + timestamp from data-pre-plain-text ──────────────
+        # Format: "[9:56 PM, 7/9/2026] Sender Name:"
+        sender, ts = "Unknown", ""
+        try:
+            pre = bubble.evaluate(
+                "el => {"
+                "  const n = el.querySelector('[data-pre-plain-text]');"
+                "  return n ? n.getAttribute('data-pre-plain-text') : '';"
+                "}"
+            ) or ""
+            if pre:
+                m_ts = re.search(r"\[([^\]]+)\]", pre)
+                if m_ts: ts = m_ts.group(1).strip()
+                m_sn = re.search(r"\]\s*(.+?)\s*:?\s*$", pre.strip())
+                if m_sn: sender = m_sn.group(1).strip()
+        except Exception:
+            pass
+
+        # Fallback timestamp from msg-meta
+        if not ts:
+            for sel in ["span[data-testid='msg-meta'] span",
+                        "span[data-testid='msg-time']"]:
+                try:
+                    val = bubble.locator(sel).first.text_content(timeout=400) or ""
+                    if val.strip(): ts = val.strip(); break
+                except Exception:
+                    pass
+
+        # Fallback sender from author span
+        if sender == "Unknown":
+            try:
+                val = bubble.locator("span[data-testid='author']").first.text_content(timeout=400) or ""
+                if val.strip() and "\n" not in val and len(val) < 60:
+                    sender = val.strip()
+            except Exception:
+                pass
+
+        ts = re.sub(r"^Edited\s*", "", ts, flags=re.IGNORECASE).strip()
+        return {"sender": sender, "wa_timestamp": ts, "text": text}
+    except Exception:
+        return None
+
+
+def _current_bubbles(page):
+    """
+    All message bubbles currently rendered in the DOM.
+    Class-based selectors first (stable across WhatsApp versions and do NOT
+    depend on data-testid), with data-testid / role fallbacks.
+    """
+    bubbles = []
+    for sel in ("div.message-in", "div.message-out"):
+        try:
+            bubbles.extend(page.locator(sel).all())
+        except Exception:
+            pass
+    if not bubbles:
+        for sel in ('div[data-testid="msg-container"]', 'div[role="row"]'):
+            try:
+                bubbles.extend(page.locator(sel).all())
+            except Exception:
+                pass
+    return bubbles
+
+
 def read_messages(page, scrape_time: datetime) -> list:
     """
-    Scroll up to load history then collect all message bubbles.
-    Uses multiple fallback selectors so WhatsApp HTML changes don't break it.
+    Load the last ONLY_LAST_HOURS of history and return the in-window messages.
+
+    WHY THIS IS WRITTEN THE WAY IT IS
+    ---------------------------------
+    WhatsApp Web *virtualises* the message list: only ~50-100 bubbles exist in
+    the DOM at once. As you scroll up, WhatsApp renders older messages and
+    DESTROYS the newer ones that are now far below the viewport.
+
+    The old approach (scroll all the way up, THEN read bubbles once) therefore
+    only ever saw a small, arbitrary slice of old messages — which is why only a
+    handful of jobs came through. Two fixes:
+
+      1. HARVEST after every scroll step and accumulate unique messages
+         (keyed by text hash) so virtualisation can't lose them.
+      2. STOP scrolling once we've loaded messages older than the time window —
+         NOT when the DOM bubble count stops changing (with virtualisation the
+         count stays roughly flat even while new content keeps loading, which
+         made the old loop quit almost immediately).
     """
+    cutoff = scrape_time - timedelta(hours=ONLY_LAST_HOURS)
+
     # ── Find the chat scroll container ───────────────────────────────
     chat = None
     for sel in [
@@ -717,146 +839,86 @@ def read_messages(page, scrape_time: datetime) -> list:
         except Exception:
             continue
 
-    # ── Scroll up to load older messages ─────────────────────────────
-    # WhatsApp only renders ~50-100 bubbles in the DOM at a time.
-    # We must scroll to top, wait for older messages to render, repeat.
-    # Key insight: after scrollTop=0, WhatsApp prepends older messages
-    # which PUSHES the scroll position down. We must keep going to top.
-    if chat:
-        # More hours = more scroll rounds needed (cap at 20)
-        scroll_rounds = min(4 + (ONLY_LAST_HOURS // 12), 20)
-        log.info("  Scrolling up (%d rounds) to load %dh of history...",
-                 scroll_rounds, ONLY_LAST_HOURS)
-        prev_count = 0
-        no_change_streak = 0
-        for i in range(scroll_rounds):
+    collected = {}   # text_hash -> message dict
+
+    def harvest():
+        """Read all rendered bubbles now and add any we haven't seen. Returns #new."""
+        gained = 0
+        for bubble in _current_bubbles(page):
+            data = _extract_bubble_data(bubble)
+            if not data:
+                continue
+            h = make_msg_hash(data["text"])
+            if h not in collected:
+                collected[h] = data
+                gained += 1
+        return gained
+
+    def oldest_dt():
+        oldest = None
+        for d in collected.values():
+            dt = parse_wa_timestamp(d["wa_timestamp"], scrape_time)
+            if dt and (oldest is None or dt < oldest):
+                oldest = dt
+        return oldest
+
+    # Grab whatever is already on screen (newest messages)
+    harvest()
+
+    if chat is None:
+        print("  [WARN] Chat container not found — reading only the visible screen")
+    else:
+        max_attempts = 60           # hard safety cap so we never loop forever
+        stale_rounds = 0
+        log.info("  Scrolling up to load %dh of history (harvesting each step)...",
+                 ONLY_LAST_HOURS)
+        for i in range(max_attempts):
             try:
-                # Scroll all the way to top
                 chat.evaluate("el => el.scrollTop = 0")
-                # First scroll needs more time for initial load
-                wait = 3.0 if i == 0 else 2.0
-                time.sleep(wait)
-                # Count visible bubbles
-                curr = len(page.locator('div[data-testid="msg-container"]').all())
-                print(f"  [SCROLL] Round {i+1}/{scroll_rounds}: {curr} bubbles visible")
-                if curr == prev_count:
-                    no_change_streak += 1
-                    if no_change_streak >= 3:
-                        print("  [SCROLL] No new messages after 3 rounds, WhatsApp history limit reached")
-                        break
-                else:
-                    no_change_streak = 0
-                prev_count = curr
             except Exception as e:
                 print(f"  [SCROLL] Error: {e}"); break
-        log.info("  Scroll complete: %d total bubbles in DOM", prev_count)
-    else:
-        print("  [WARN] Chat container not found — cannot scroll")
+            # First scroll needs longer for the initial history fetch
+            time.sleep(3.0 if i == 0 else 1.6)
 
-    # ── Collect bubbles (multiple selectors for resilience) ──────────
-    bubbles = []
-    for sel in [
-        'div.message-in[data-testid="msg-container"]',
-        'div.message-out[data-testid="msg-container"]',
-    ]:
-        bubbles.extend(page.locator(sel).all())
+            gained = harvest()
+            od = oldest_dt()
+            od_str = od.strftime('%m/%d %H:%M') if od else "?"
+            print(f"  [SCROLL] Round {i+1}: +{gained} new "
+                  f"(total {len(collected)}, oldest loaded: {od_str})")
 
-    if not bubbles:
-        bubbles = page.locator('div[data-testid="msg-container"]').all()
+            # Stop once we've paged past the time window
+            if od and od < cutoff:
+                print("  [SCROLL] Reached messages older than the window — stopping")
+                break
 
-    print(f"  [READ] {len(bubbles)} total bubbles found")
+            # Only give up when NO new unique messages appear for several rounds
+            # in a row (genuine top of chat / history limit).
+            if gained == 0:
+                stale_rounds += 1
+                if stale_rounds >= 5:
+                    print("  [SCROLL] No new messages after 5 rounds — top reached")
+                    break
+            else:
+                stale_rounds = 0
 
-    messages = []
-    seen_in_page = set()
+        # One more harvest in case the final scroll rendered extra bubbles
+        harvest()
 
-    for bubble in bubbles[-MAX_MSGS:]:
-        try:
-            # ── Expand "Read more" if present ─────────────────────────
-            # WhatsApp collapses long messages with a "Read more" span.
-            # We must click it before reading text_content() or we only
-            # get the first ~250 visible chars followed by "…".
-            try:
-                read_more = bubble.locator(
-                    'span[role="button"]:has-text("Read more"), '
-                    'span.read-more-button, '
-                    'span[data-testid="read-more-button"], '
-                    'div[aria-label="Read more"]'
-                ).first
-                if read_more.is_visible(timeout=300):
-                    read_more.click(timeout=1000)
-                    time.sleep(0.1)
-            except Exception:
-                pass
+    log.info("  Collected %d unique messages from DOM", len(collected))
 
-            # ── Text ─────────────────────────────────────────────────
-            # Use innerText via JS — more reliable than text_content()
-            # for multi-line messages and captures full expanded content
-            try:
-                text = bubble.evaluate(
-                    "el => {"
-                    "  const spans = el.querySelectorAll('span.selectable-text');"
-                    "  return Array.from(spans).map(s => s.innerText || s.textContent).join('\\n').trim();"
-                    "}"
-                ) or ""
-            except Exception:
-                text = (bubble.locator("span.selectable-text").first
-                        .text_content(timeout=2000) or "").strip()
+    # ── Time-window filter ───────────────────────────────────────────
+    messages = [d for d in collected.values()
+                if is_within_hours(d["wa_timestamp"], ONLY_LAST_HOURS, scrape_time)]
 
-            text = text.strip()
-            if not text or text in seen_in_page: continue
-            seen_in_page.add(text)
-
-            # ── Sender + Timestamp from data-pre-plain-text ──────────
-            # Format: "[9:56 PM, 7/9/2026] Sender Name:"
-            sender, ts = "Unknown", ""
-            try:
-                pre = bubble.evaluate(
-                    "el => {"
-                    "  const n = el.querySelector('[data-pre-plain-text]');"
-                    "  return n ? n.getAttribute('data-pre-plain-text') : '';"
-                    "}"
-                ) or ""
-                if pre:
-                    m_ts = re.search(r"\[([^\]]+)\]", pre)
-                    if m_ts: ts = m_ts.group(1).strip()
-                    m_sn = re.search(r"\]\s*(.+?)\s*:?\s*$", pre.strip())
-                    if m_sn: sender = m_sn.group(1).strip()
-            except Exception:
-                pass
-
-            # Fallback timestamp from msg-meta
-            if not ts:
-                for sel in ["span[data-testid='msg-meta'] span", "span[data-testid='msg-time']"]:
-                    try:
-                        val = bubble.locator(sel).first.text_content(timeout=500) or ""
-                        if val.strip(): ts = val.strip(); break
-                    except Exception:
-                        pass
-
-            # Fallback sender from author span
-            if sender == "Unknown":
-                try:
-                    val = bubble.locator("span[data-testid='author']").first.text_content(timeout=500) or ""
-                    if val.strip() and "\n" not in val and len(val) < 60:
-                        sender = val.strip()
-                except Exception:
-                    pass
-
-            # Clean timestamp
-            ts = re.sub(r"^Edited\s*", "", ts, flags=re.IGNORECASE).strip()
-
-            # ── Time filter ──────────────────────────────────────────
-            if not is_within_hours(ts, ONLY_LAST_HOURS, scrape_time):
-                continue
-
-            messages.append({"sender": sender, "wa_timestamp": ts, "text": text})
-
-        except Exception as e:
-            print(f"  [WARN] Bubble error: {e}")
-            continue
+    # ── Respect max_messages_per_group (keep the most recent) ────────
+    if len(messages) > MAX_MSGS:
+        messages.sort(
+            key=lambda d: parse_wa_timestamp(d["wa_timestamp"], scrape_time) or scrape_time,
+            reverse=True,
+        )
+        messages = messages[:MAX_MSGS]
 
     return messages
-
 
 # ══════════════════════════════════════════════════════════════════════
 #  MAIN
