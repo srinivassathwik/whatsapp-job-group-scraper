@@ -1,0 +1,46 @@
+# ── WhatsApp session (your login — NEVER commit this) ──────────────────
+wa_session/
+wa_session/**
+
+# ── Scraped data (private messages) ────────────────────────────────────
+output/
+output/**
+
+# ── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+env/
+.venv/
+.env/
+
+# ── Logs ────────────────────────────────────────────────────────────────
+*.log
+scraper.log
+
+# ── OS files ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ─────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ── Environment variables ────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+
+# ── Playwright browser binaries (large, installed via playwright install) ─
+**/ms-playwright/

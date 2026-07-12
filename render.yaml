@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: c2c-job-scraper
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    healthCheckPath: /
