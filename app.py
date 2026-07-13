@@ -160,7 +160,7 @@ def api_jobs():
             hay=" ".join(filter(None,[j.get("job_title"),j.get("location"),
                 j.get("client")," ".join(j.get("skills") or []),j.get("raw_message","")])).lower()
             if q not in hay: return False
-        if contract and j.get("contract_type","").upper()!=contract.upper(): return False
+        if contract and (j.get("contract_type") or "").upper()!=contract.upper(): return False
         if visa:
             jv=[v.upper().replace(" ","") for v in (j.get("visa_types") or [])]
             if visa.upper().replace(" ","") not in jv: return False
