@@ -446,6 +446,24 @@ HTML = r"""<!DOCTYPE html>
   --bar-h:   38px;
   --tab-h:   45px;
 }
+/* Light mode */
+body.light{
+  --bg:#f5f0e8;--panel:#ffffff;--panel2:#f0ebe0;--border:#d4c8b0;
+  --text:#2a2018;--dim:#7a6a50;
+  --accent:#c47d0a;--accent-dim:#fdf0d8;--accent-glow:#c47d0a30;
+  --green:#2a7a3a;--green-dim:#e8f5eb;
+  --blue:#1a5fa8;--orange:#c47d0a;--purple:#6a3a9a;
+  --red:#b83a2a;--yellow:#8a5a00;--cyan:#1a6a5a;
+}
+body.light .log-box{background:#f8f4ee}
+body.light #modal{background:#ffffff}
+body.light .raw-box{background:#f8f4ee}
+body.light tbody tr:hover{background:#fdf8f0}
+body.light .tc2c{background:#fff8e8;border-color:#d4a830}
+body.light .tw2{background:#e8f0ff;border-color:#4a7ac8}
+body.light .tskill{background:#e8f8f5;border-color:#2a8a7a}
+body.light .tok{background:#e8f5eb;border-color:#2a7a3a}
+body.light .tspam{background:#fde8e8;border-color:#c84a3a}
 *{box-sizing:border-box;margin:0;padding:0}
 body{
   background:var(--bg);
@@ -757,6 +775,7 @@ td{padding:10px 12px;vertical-align:top}
   <button class="nav-btn" onclick="showPage('jobs',this)">📋 Jobs</button>
   <button class="nav-btn" onclick="showPage('review',this)">🔍 Review</button>
   <div class="nav-stats" id="nav-stats">loading...</div>
+  <button id="theme-btn" onclick="toggleTheme()" style="background:none;border:1px solid var(--border);color:var(--dim);padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;margin-left:8px;transition:all .15s">🌙 Dark</button>
 </nav>
 
 <!-- ══════════════════════════════════════════════════════════════
@@ -1031,8 +1050,11 @@ td{padding:10px 12px;vertical-align:top}
     <h2 id="m-title"></h2>
     <div class="m-pills" id="m-pills"></div>
     <div class="m-grid" id="m-grid"></div>
-    <button class="raw-toggle" id="raw-toggle" onclick="toggleRaw()">Show raw message</button>
-    <pre class="raw-box" id="m-raw" style="display:none"></pre>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:12px">
+      <button class="raw-toggle" id="raw-toggle" onclick="toggleRaw()">Show raw message</button>
+      <button id="copy-raw-btn" onclick="copyRaw()" style="display:none;background:none;border:1px solid var(--border);color:var(--dim);padding:5px 12px;border-radius:5px;font-size:11px;cursor:pointer;transition:all .15s">📋 Copy</button>
+    </div>
+    <pre class="raw-box" id="m-raw" style="display:none;white-space:pre-wrap;word-break:break-word"></pre>
   </div>
 </div>
 
@@ -1467,12 +1489,39 @@ function openReviewModal(r){
 }
 function closeModal(){$('overlay').classList.remove('open')}
 function toggleRaw(){
-  const raw=$('m-raw');const shown=raw.style.display!=='none';
-  raw.style.display=shown?'none':'block';
-  $('raw-toggle').textContent=shown?'Show raw message':'Hide raw message';
+  const r=$('m-raw'),cb=$('copy-raw-btn'),s=r.style.display!=='none';
+  r.style.display=s?'none':'block';
+  if(cb)cb.style.display=s?'none':'inline-block';
+  $('raw-toggle').textContent=s?'Show raw message':'Hide raw message';
+}
+function copyRaw(){
+  const text=$('m-raw').textContent;
+  navigator.clipboard.writeText(text).then(()=>{
+    const b=$('copy-raw-btn'),o=b.textContent;
+    b.textContent='✓ Copied!';b.style.color='var(--accent)';b.style.borderColor='var(--accent)';
+    setTimeout(()=>{b.textContent=o;b.style.color='';b.style.borderColor='';},2000);
+  }).catch(()=>{
+    const ta=document.createElement('textarea');ta.value=$('m-raw').textContent;
+    document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);
+    const b=$('copy-raw-btn');b.textContent='✓ Copied!';setTimeout(()=>b.textContent='📋 Copy',2000);
+  });
 }
 $('overlay').onclick=e=>{if(e.target.id==='overlay')closeModal();}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+// ── Theme toggle ────────────────────────────────────────────────────────
+function toggleTheme(){
+  const isLight=document.body.classList.toggle('light');
+  const btn=$('theme-btn');
+  btn.textContent=isLight?'☀️ Light':'🌙 Dark';
+  localStorage.setItem('theme',isLight?'light':'dark');
+}
+(function(){
+  if(localStorage.getItem('theme')==='light'){
+    document.body.classList.add('light');
+    const b=$('theme-btn');if(b)b.textContent='☀️ Light';
+  }
+})();
 
 // debounce text inputs
 let dTimer;

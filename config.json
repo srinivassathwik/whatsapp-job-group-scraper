@@ -8,7 +8,7 @@
   ],
   "────── SCRAPING LIMITS ─────────────────────────────────────": "",
   "max_messages_per_group": 200,
-  "only_last_hours": 1678,
+  "only_last_hours": 20,
   "────── OUTPUT FILES ────────────────────────────────────────": "",
   "output_dir": "./output",
   "raw_messages_file": "raw_messages.json",

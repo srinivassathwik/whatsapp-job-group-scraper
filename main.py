@@ -612,17 +612,26 @@ def get_search_input(page):
 def fuzzy_match(config_name: str, result_title: str) -> bool:
     """
     True if config_name and result_title are the same group.
-    Strips pipes, commas, spaces, underscores and compares case-insensitively.
-    Also checks if the first 3 meaningful words of config appear in title.
+
+    Strategy:
+    1. Exact match after stripping punctuation/spaces
+    2. ALL words of config_name appear as WHOLE WORDS in result_title
+       (uses word boundaries to prevent 'IT' matching inside 'recruiTIng')
     """
     def clean(s): return re.sub(r'[|,_\-\s]+', '', s).lower()
-    cn = clean(config_name)
-    rt = clean(result_title)
-    if cn in rt or rt in cn: return True
-    # word-level fuzzy: first 3 words of config in title
-    words = [w for w in re.split(r'[|,_\-\s]+', config_name) if len(w) > 1][:3]
-    return all(w.lower() in result_title.lower() for w in words)
 
+    # 1. Exact clean match
+    if clean(config_name) == clean(result_title):
+        return True
+
+    # 2. Word-boundary check — ALL config words must appear as whole words
+    words = [w for w in re.split(r'[|,_\-\s]+', config_name) if len(w) > 1]
+    if not words:
+        return False
+    return all(
+        bool(re.search(r'\b' + re.escape(w) + r'\b', result_title, re.IGNORECASE))
+        for w in words
+    )
 def open_group(page, group_name: str) -> bool:
     """
     Open a WhatsApp group by name.
