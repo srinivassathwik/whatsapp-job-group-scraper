@@ -155,10 +155,13 @@ def parse_wa_timestamp(ts_str: str, scrape_time: datetime):
 
     # Try all known full-date formats first
     for fmt in (
-        "%I:%M %p, %m/%d/%Y",   # "9:56 PM, 7/9/2026"  ← WhatsApp actual format
+        "%I:%M %p, %m/%d/%Y",   # "9:56 PM, 7/9/2026"  M/D/Y
+        "%I:%M %p, %d/%m/%Y",   # "9:56 PM, 16/7/2026" D/M/Y ← WhatsApp India locale
         "%I:%M %p, %m/%d/%y",   # "9:56 PM, 7/9/26"
+        "%I:%M %p, %d/%m/%y",   # "9:56 PM, 16/7/26"
         "%m/%d/%Y, %I:%M %p",   # "7/9/2026, 9:56 PM"
-        "%m/%d/%y, %I:%M %p",   # "7/9/26, 9:56 PM"
+        "%d/%m/%Y, %I:%M %p",   # "16/7/2026, 9:56 PM"
+        "%m/%d/%y, %I:%M %p",
         "%d/%m/%Y, %H:%M",
         "%m/%d/%Y, %H:%M",
         "%Y-%m-%dT%H:%M:%S",    # ISO
@@ -232,6 +235,10 @@ SPAM_PATTERNS = [
     # BDM / business ads
     r"bdm\s+freelancer", r"looking\s+for\s+bdm",
     r"business\s+development\s+manager.*intrested",
+    # Business/tool ads
+    r"voip\s+solution", r"staffing\s+software", r"ats\s+software",
+    r"looking\s+for\s+a\s+reliable\s+voip",
+    r"crm\s+solution.*staffing", r"staffing\s+tool",
     # LinkedIn / account sales
     r"linkedin\s+for\s+sale", r"linkedin\s+account\s+for\s+sale",
     r"20\d\d\s+linkedin",
@@ -245,7 +252,7 @@ SPAM_PATTERNS = [
     r"we\s+are\s+(?:hiring|looking\s+for)\s+(?:an?\s+)?recruiter",
     # India-based jobs (not US C2C) — night shift / Indian cities
     r"night\s+shift.*us\s+shift|us\s+shift.*night\s+shift",
-    r"location[:\s]+(?:hyderabad|bangalore|chennai|pune|mumbai|noida|gurgaon|visakhapatnam|vizag|india|kolkata|ahmedabad|kochi|coimbatore)",
+    r"location[:\s]+(?:hyderabad|bangalore|bengaluru|chennai|pune|mumbai|noida|gurgaon|gurugram|visakhapatnam|vizag|india|kolkata|ahmedabad|kochi|coimbatore|begumpet|madhapur|hitech|banjara|secunderabad|ameerpet|whitefield|koramangala)",
     r"(?:technical\s+it\s+recruiter|it\s+recruiter|bench\s+sales)\s*[\|].*(?:visakhapatnam|hyderabad|bangalore|india)",
     r"(?:bench\s+sales\s+recruiter|us\s+it\s+recruiter).*(?:hyderabad|bangalore|india)",
     # Training / course ads
@@ -258,7 +265,8 @@ SPAM_PATTERNS = [
     # LinkedIn posts / social shares (not jobs)
     r"linkedin\.com/posts?/",
     r"#opentowork",
-    r"liked\s+this\s+post|please\s+(?:like|share|repost)",
+    # NOTE: Removed "liked this post|please like/share/repost" pattern
+    # because it was blocking real job posts that contain forwarded metadata
 ]
 
 def is_spam(text: str) -> bool:
@@ -612,26 +620,17 @@ def get_search_input(page):
 def fuzzy_match(config_name: str, result_title: str) -> bool:
     """
     True if config_name and result_title are the same group.
-
-    Strategy:
-    1. Exact match after stripping punctuation/spaces
-    2. ALL words of config_name appear as WHOLE WORDS in result_title
-       (uses word boundaries to prevent 'IT' matching inside 'recruiTIng')
+    Strips pipes, commas, spaces, underscores and compares case-insensitively.
+    Also checks if the first 3 meaningful words of config appear in title.
     """
     def clean(s): return re.sub(r'[|,_\-\s]+', '', s).lower()
+    cn = clean(config_name)
+    rt = clean(result_title)
+    if cn in rt or rt in cn: return True
+    # word-level fuzzy: first 3 words of config in title
+    words = [w for w in re.split(r'[|,_\-\s]+', config_name) if len(w) > 1][:3]
+    return all(w.lower() in result_title.lower() for w in words)
 
-    # 1. Exact clean match
-    if clean(config_name) == clean(result_title):
-        return True
-
-    # 2. Word-boundary check — ALL config words must appear as whole words
-    words = [w for w in re.split(r'[|,_\-\s]+', config_name) if len(w) > 1]
-    if not words:
-        return False
-    return all(
-        bool(re.search(r'\b' + re.escape(w) + r'\b', result_title, re.IGNORECASE))
-        for w in words
-    )
 def open_group(page, group_name: str) -> bool:
     """
     Open a WhatsApp group by name.
@@ -1009,8 +1008,25 @@ def main():
 
     save_seen_ids(seen_ids | new_seen)
     save_json(existing_raw    + new_raw,    RAW_FILE)
-    save_json(existing_jobs   + new_jobs,   JOBS_FILE)
     save_json(existing_review + new_review, REVIEW_FILE)
+
+    # Deduplicate jobs by msg_id — same message in multiple groups = one job entry
+    all_jobs = existing_jobs + new_jobs
+    seen_msg_ids = set()
+    deduped_jobs = []
+    dup_count = 0
+    for job in all_jobs:
+        mid = job.get('msg_id', '')
+        if mid and mid in seen_msg_ids:
+            dup_count += 1
+            log.info("  [DEDUP] Skipping duplicate msg_id: %s | %s",
+                     mid[:12], (job.get('job_title') or '')[:40])
+        else:
+            seen_msg_ids.add(mid)
+            deduped_jobs.append(job)
+    if dup_count:
+        log.info("  [DEDUP] Removed %d duplicate jobs (same message in multiple groups)", dup_count)
+    save_json(deduped_jobs, JOBS_FILE)
 
     n_job  = sum(1 for r in new_review if r["status"] == "job")
     n_spam = sum(1 for r in new_review if r["status"] == "spam")
