@@ -147,6 +147,8 @@ def api_scrape_status():
 def api_jobs():
     jobs = load_json("jobs.json")
     q        = request.args.get("q","").strip().lower()
+    title_q  = request.args.get("title","").strip().lower()
+    skill_q  = request.args.get("skill","").strip().lower()
     contract = request.args.get("contract","").strip()
     visa     = request.args.get("visa","").strip()
     location = request.args.get("location","").strip().lower()
@@ -156,6 +158,14 @@ def api_jobs():
     has_mail = request.args.get("has_email","")
 
     def ok(j):
+        if title_q:
+            if title_q not in (j.get("job_title") or "").lower():
+                return False
+        if skill_q:
+            skills_str = " ".join(j.get("skills") or []).lower()
+            raw = (j.get("raw_message") or "").lower()
+            if skill_q not in skills_str and skill_q not in raw:
+                return False
         if q:
             hay=" ".join(filter(None,[j.get("job_title"),j.get("location"),
                 j.get("client")," ".join(j.get("skills") or []),j.get("raw_message","")])).lower()
@@ -952,8 +962,12 @@ td{padding:10px 12px;vertical-align:top}
   <div style="display:flex;min-height:calc(100vh - 52px)">
     <aside class="jobs-sidebar">
       <div class="fg">
-        <span class="lbl">Search</span>
-        <input id="jq" type="text" placeholder="title, skill, location…">
+        <span class="lbl">Title Search</span>
+        <input id="jtitle" type="text" placeholder="Java Developer, SAP Lead…">
+      </div>
+      <div class="fg">
+        <span class="lbl">Skill Search</span>
+        <input id="jskill" type="text" placeholder="Java, React, AWS, Python…">
       </div>
       <div class="fg">
         <span class="lbl">Contract Type</span>
@@ -1319,7 +1333,7 @@ function toggleTog(btn){
   btn.classList.toggle('active',togState[f]);loadJobs();
 }
 function resetJobFilters(){
-  $('jq').value='';$('jloc').value='';
+  $('jtitle').value='';$('jskill').value='';$('jloc').value='';
   ['jcontract','jvisa','jgroup'].forEach(id=>$(id).value='');
   document.querySelectorAll('#jexp-checks input').forEach(c=>c.checked=false);
   Object.keys(togState).forEach(k=>togState[k]=false);
@@ -1356,7 +1370,8 @@ function loadJobMeta(){
 let jdeb;
 function loadJobs(){
   const p=new URLSearchParams();
-  const qv=$('jq').value.trim();if(qv)p.set('q',qv);
+  const tv=$('jtitle').value.trim();if(tv)p.set('title',tv);
+  const sv=$('jskill').value.trim();if(sv)p.set('skill',sv);
   const cv=$('jcontract').value;if(cv)p.set('contract',cv);
   const vv=$('jvisa').value;if(vv)p.set('visa',vv);
   const gv=$('jgroup').value;if(gv)p.set('group',gv);
@@ -1525,7 +1540,7 @@ function toggleTheme(){
 
 // debounce text inputs
 let dTimer;
-['jq','jloc'].forEach(id=>{
+['jtitle','jskill','jloc'].forEach(id=>{
   $(id).addEventListener('input',()=>{clearTimeout(dTimer);dTimer=setTimeout(loadJobs,280);});
 });
 
